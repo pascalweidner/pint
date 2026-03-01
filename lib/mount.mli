@@ -1,0 +1,1 @@
+val setup_mount_ns: string -> unit

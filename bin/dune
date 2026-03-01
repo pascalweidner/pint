@@ -1,0 +1,4 @@
+(executable
+ (public_name pint)
+ (name main)
+ (libraries pint ctypes ctypes.foreign ))
