@@ -7,6 +7,7 @@ module MountRaw = struct
     let msprivate = 1 lsl 18
     let msnosuid = 2
     let msnoexec = 8
+    let msrdonly = 1
 
     let mount = foreign "mount" ~check_errno:true 
         (string @-> string @-> string @-> ulong @-> ptr void 
@@ -34,13 +35,29 @@ let mount_proc () =
     | 0 -> ()
     | _ -> prerr_endline "[Warning] Failed to mount /proc"
 
-let mount_sys () = 
+let mount_sys new_root = 
     let open MountRaw in
     let flags = Unsigned.ULong.zero in
+    (*TODO: create the sys folder if it doesn't exist*)
 
-    match mount "sysfs" "/sys" "sysfs" flags null with
+    match mount "sysfs" (new_root ^ "/sys") "sysfs" flags null with
     | 0 -> ()
     | _ -> prerr_endline "[Warning] Failed to mount /sys"
+
+let mount_cgroup new_root =
+    let open MountRaw in
+    let flags = Unsigned.ULong.of_int msrdonly in
+
+    begin
+        try 
+            Unix.mkdir (new_root ^ "/sys/fs/cgroup") 0o755    
+        with Unix.Unix_error (Unix.EEXIST, _, _) ->
+            Printf.eprintf "[Info] /sys/fs/cgroup already exists. Will not be created.\n%!"
+    end;
+
+    match mount "cgroup2" (new_root ^ "/sys/fs/cgroup") "cgroup2" flags null with
+    | 0 -> ()
+    | _ -> prerr_endline "[Warning] Failed to mount /sys/fs/cgroup"
 
 let mount_dev new_root =
     let open MountRaw in
@@ -88,11 +105,15 @@ end
 let pivot_root = let open PivotRaw in
     syscall syspivotroot
 
+
+
 let setup_mount_ns new_root =
     try begin
         ignore (mount_private "/");
         ignore (mount_bind new_root);
         ignore (mount_dev new_root);
+        mount_sys new_root;
+        mount_cgroup new_root;
 
         let resolv_conf_path = new_root ^ "/etc/resolv.conf" in
         let out_ch = open_out resolv_conf_path in
@@ -114,7 +135,6 @@ let setup_mount_ns new_root =
         Unix.rmdir absolute_put_old;
 
         mount_proc ();
-        mount_sys ()
     end
     with
         | Unix.Unix_error (err, syscall_name, _) ->

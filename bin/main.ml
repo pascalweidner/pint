@@ -20,31 +20,38 @@ let () =
         Unix.close pipe2_r;
 
         try 
-            Isolate.(namespaces [NEWPID; NEWIPC; NEWNET; NEWNS; NEWUTS]);
+            Isolate.(namespaces [NEWPID; NEWNET]);
 
             match Unix.fork() with
             | 0 -> 
-                Uts.setup_uts_ns "pint1" "pint2";
-
-                notify_pipe pipe2_w;
                 Unix.close pipe2_w;
+
+                Isolate.(namespaces [NEWNS; NEWIPC; NEWUTS]);
+
+                Uts.setup_uts_ns "pint1" "pint2";
 
                 wait_pipe pipe_r;
                 Unix.close pipe_r;
 
+                Isolate.(namespaces [NEWCGROUP]);
+
                 Mount.setup_mount_ns "/mnt/d/development/pint/container";
 
                 Printf.printf "\n[Container] pivot_root successful!\n";
-                let files = Sys.readdir "/" in
-                Array.iter (fun f -> Printf.printf "  - %s\n" f) files;
 
                 Printf.printf "\n[Container] Start shell...\n%!";
                 Unix.execv "/bin/sh" [|"/bin/sh"|]
             | gc_pid -> 
-                Unix.close pipe2_w;
                 Unix.close pipe_r;
 
+                Cgroup.setup_cgroup gc_pid;
+
+                notify_pipe pipe2_w;
+                Unix.close pipe2_w;
+
                 ignore (Unix.waitpid [] gc_pid);
+
+                Cgroup.destroy_cgroup gc_pid;
                 exit 0
 
         with e ->

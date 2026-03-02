@@ -13,6 +13,3 @@ let setup_uts_ns hostname domainname =
     let len2 = Unsigned.Size_t.of_int (String.length domainname) in
     ignore (sethostname hostname len);
     ignore (setdomainname domainname len2)
-
-
-
