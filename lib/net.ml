@@ -20,20 +20,26 @@ let ensure_bridge_exists () =
         run_cmd "iptables -A FORWARD -i pint0 -j ACCEPT";
         run_cmd "iptables -A FORWARD -o pint0 -j ACCEPT"
 
-let setup_net_ns container_pid container_ip= 
+let setup_net_ns container_pid container_ip = 
     ensure_bridge_exists ();
+
     let host_iface = Printf.sprintf "veth%d" container_pid in
+    let temp_peer = Printf.sprintf "vpeer%d" container_pid in
+
     ignore (host_iface |> Printf.sprintf "ip link delete %s 2>/dev/null" |> Sys.command);
-    host_iface |> Printf.sprintf "ip link add %s type veth peer name eth0" |> run_cmd;
+    ignore (temp_peer |> Printf.sprintf "ip link delete %s 2>/dev/null" |> Sys.command);
+
+    Printf.sprintf "ip link add %s type veth peer name %s" host_iface temp_peer |> run_cmd;
 
     host_iface |> Printf.sprintf "ip link set %s master pint0" |> run_cmd;
     host_iface |> Printf.sprintf "ip link set %s up" |> run_cmd;
 
-    container_pid |> Printf.sprintf "ip link set eth0 netns %d" |> run_cmd;
+    Printf.sprintf "ip link set %s netns %d" temp_peer container_pid |> run_cmd;
+
+    Printf.sprintf "nsenter -t %d -n ip link set dev %s name eth0" container_pid temp_peer |> run_cmd;
 
     Printf.sprintf "nsenter -t %d -n ip addr add %s/24 dev eth0" container_pid container_ip |> run_cmd;
     container_pid |> Printf.sprintf "nsenter -t %d -n ip link set eth0 up"  |> run_cmd;
     container_pid |> Printf.sprintf "nsenter -t %d -n ip link set lo up" |> run_cmd;
-
     container_pid |> Printf.sprintf "nsenter -t %d -n ip route add default via 10.0.0.1" |> run_cmd;
 

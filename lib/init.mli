@@ -1,0 +1,1 @@
+val init_infrastructure: unit -> unit

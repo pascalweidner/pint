@@ -1,0 +1,18 @@
+{
+    "container_name": "my_web_app",
+    "command": [
+        "/bin/sh",
+        "-c",
+        "while true; do echo 'Hello from stdout!'; echo 'Error form stderr!' >&2; sleep 2; done"
+    ],
+    "port_mappings": [
+        { "host": 8080, "container": 80 }
+    ],
+    "mounts": [
+        { "host": "/mnt/d/development/pint/code", "container": "/app" }
+    ],
+    "resources": {
+        "memory_mb": 100,
+        "pids_limit": 512
+    }
+}

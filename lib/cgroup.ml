@@ -40,6 +40,44 @@ let setup_cgroup container_pid =
     | None ->
         failwith "[CGroup] Cgroup mount was not found\n"
 
+let write_limit name limit_path raw_value convert =
+    let str_val = convert raw_value in
+    Printf.printf "[CGroup] Setting %s limit to %s...\n%!" name str_val;
+    try
+        let oc = open_out limit_path in
+        Printf.fprintf oc "%s\n" str_val;
+        close_out oc;
+        Printf.printf "[CGroup] Successfully set %s.\n%!" name
+    with Sys_error err ->
+        Printf.printf "[CGroup] Error setting %s: %s\n%!" name err
+
+let add_limits (limits_opt: Parse.resource_config option) container_pid =
+    match find_cgroup2_mount () with
+    | None -> failwith "[CGroup] Fatal: cgroup2 mount not found!"
+    | Some path ->
+        match limits_opt with
+        | None -> 
+            let cgroup_dir = Printf.sprintf "%s/container_%d/pids.max" path container_pid in
+            write_limit "PIDs" cgroup_dir 512 string_of_int
+        | Some limits ->
+            let cgroup_dir = Printf.sprintf "%s/container_%d" path container_pid in
+
+            let pids_val = Option.value limits.pids_limit ~default:512 in
+            write_limit "PIDs" (cgroup_dir ^ "/pids.max") pids_val string_of_int;
+
+            Option.iter (fun mb ->
+                write_limit "Memory" (cgroup_dir ^ "/memory.max") mb (fun x ->
+                    string_of_int (x * 1024 * 1024))
+            ) limits.memory_mb;
+
+            Option.iter (fun cores ->
+                write_limit "CPU" (cgroup_dir ^ "/cpu.max") cores (fun c ->
+                    let period = 100_000 in
+                    let quota = int_of_float (c *. float_of_int period) in
+                    Printf.sprintf "%d %d" quota period
+                )
+            ) limits.cpus
+
 let destroy_cgroup container_pid =
     match find_cgroup2_mount () with
     | Some path ->

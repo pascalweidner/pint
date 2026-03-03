@@ -1,4 +1,5 @@
 (executable
  (public_name pint)
  (name main)
- (libraries pint ctypes ctypes.foreign ))
+ (libraries pint ctypes ctypes.foreign yojson lwt lwt.unix cohttp-lwt-unix)
+ (preprocess (pps lwt_ppx)))

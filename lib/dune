@@ -1,3 +1,4 @@
 (library
  (name pint)
- (libraries ctypes ctypes.foreign))
+ (libraries ctypes ctypes.foreign yojson lwt lwt.unix cohttp-lwt-unix)
+ (preprocess (pps lwt_ppx)))
