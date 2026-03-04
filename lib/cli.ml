@@ -110,7 +110,6 @@ let setup_and_start_container config_path =
     | -1 -> failwith "Container could not be created";
     | 0 -> 
         ignore (Unix.execv "/proc/self/exe" [|"pint"; "internal_shim"; id; folder|])
-    | pid ->
+    | _ ->
         Printf.printf "Container %s started in background!\n" id;
-        ignore (Unix.waitpid [] pid);
         exit 0

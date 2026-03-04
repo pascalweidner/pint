@@ -201,5 +201,15 @@ let start_daemon ip config folder =
 
 
 let setup_and_start config folder =
+    ignore (Unix.setsid ());
+
+    let dev_null = Unix.openfile "/dev/null" [Unix.O_RDWR] 0o666 in
+    Unix.dup2 dev_null Unix.stdin;
+    Unix.dup2 dev_null Unix.stdout;
+    Unix.dup2 dev_null Unix.stderr;
+    Unix.close dev_null;
+
     let ip = Ipam.get_ip () in
+
+
     start_daemon ip config folder
