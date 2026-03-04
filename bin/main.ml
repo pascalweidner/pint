@@ -1,32 +1,47 @@
 open Pint
 
-let generate_id () =
-    let ic = open_in_bin "/dev/urandom" in
-    let raw_bytes = Bytes.create 16 in
+let usage () =
+    print_endline "Usage: pint <command> [args]";
+    print_endline "Commands:";
+    print_endline "  run <config.json>      Start a new container";
+    print_endline "  stop <container_name>  Stop a running container";
+    print_endline "  rm <container_name>    Delete a stopped container";
+    print_endline "  start <container_name> Start a stopped container"
 
-    really_input ic raw_bytes 0 16;
-    close_in ic;
+let internal_shim args =
+    if (Array.length args) <> 4 then failwith "Internal error: Invalid shim";
 
-    let hex_bytes = Bytes.create 32 in
-    let hex_chars = "0123456789abcdef" in
+    let _ = args.(2) in
+    let folder = args.(3) in
 
-    for i = 0 to 15 do
-        let b = Char.code (Bytes.get raw_bytes i) in
-        Bytes.set hex_bytes (i * 2) hex_chars.[b lsr 4];
-        Bytes.set hex_bytes (i * 2 + 1) hex_chars.[b land 0x0f];
-    done;
+    let config_path = Printf.sprintf "%s/config.json" folder in
+    let config = Parse.load_config config_path in
 
-    Bytes.to_string hex_bytes
+    Shim.setup_and_start config folder
+
+let run args =
+    if (Array.length args) <> 3 then usage ();
+
+    let config_path = args.(2) in
+
+    Cli.setup_and_start_container config_path
+
 
 let () =
     Init.init_infrastructure ();
 
     let args = Sys.argv in
-    match Array.length args with
-    | 2 -> 
-        let config = Parse.load_config args.(1) in
-        let container_id = generate_id () in
-        let free_ip = Ipam.get_ip () in
-        let folder = Container.setup container_id args.(1) in
-        Container.start config folder free_ip container_id
-    | _ -> failwith ("No configuration specified!")
+
+    if Array.length args < 2 then (
+        usage ();
+        exit 1;
+    ) else
+
+        match args.(1) with
+        | "run" -> run args
+        | "stop" -> ()
+        | "internal_shim" -> internal_shim args
+        | _ -> 
+            Printf.printf "Unknown command: %s\n" args.(1);
+            usage ();
+            exit 1
