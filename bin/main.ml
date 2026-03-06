@@ -6,7 +6,9 @@ let usage () =
     print_endline "  run <config.json>      Start a new container";
     print_endline "  stop <container_name>  Stop a running container";
     print_endline "  rm <container_name>    Delete a stopped container";
-    print_endline "  start <container_name> Start a stopped container"
+    print_endline "  start <container_name> Start a stopped container";
+    print_endline "  ps                     List all running containers"
+
 
 
 let internal_shim args =
@@ -35,6 +37,40 @@ let stop args =
     Cli.stop_container container_id
 
 
+let ps args =
+    let all =
+        if Array.length args >= 3 && (args.(2) = "-a" || args.(2) = "--all") then true 
+        else false
+    in
+    
+    Cli.list_containers all
+
+
+let rm args =
+    let args_list =
+        let all_args = Array.to_list args in
+        match all_args with
+        | _ :: _ :: rest -> rest
+        | _ -> []
+    in
+
+    let rec parse force id = function
+        | [] -> (force, id)
+        | ("-f" | "--foce") :: rest ->
+            parse true id rest
+        | value :: rest ->
+            if id = None then
+                parse force (Some value) rest
+            else failwith (Printf.sprintf "Unepected argument: %s" value)
+    in
+
+    match parse false None args_list with
+        | (force, Some container_id) ->
+            Cli.remove_container container_id force
+        | (_, None) ->
+            usage()
+
+
 let () =
     Init.init_infrastructure ();
 
@@ -46,8 +82,10 @@ let () =
     ) else
 
         match args.(1) with
-        | "run" -> run args
+        | "run" -> run args false
         | "stop" -> stop args
+        | "ps" -> ps args
+        | "rm" -> rm args
         | "internal_shim" -> internal_shim args
         | _ -> 
             Printf.printf "Unknown command: %s\n" args.(1);

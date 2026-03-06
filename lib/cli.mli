@@ -1,3 +1,7 @@
-val setup_and_start_container: string  -> unit
+val setup_and_start_container: string -> bool -> unit
 
 val stop_container: string -> unit 
+
+val list_containers: bool -> unit
+
+val remove_container: string -> bool -> unit

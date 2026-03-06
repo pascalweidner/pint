@@ -8,53 +8,6 @@ let wait_pipe fd =
     if bytes_read = 0 then
         failwith "Pipe returned 0 bytes (EOF). The other process crashed!"
         
-let setup_logger folder =
-    let open Lwt.Infix in
-    let path = Printf.sprintf "%s/container.log" folder in
-    Lwt_io.open_file ~flags:[Unix.O_CREAT; Unix.O_WRONLY; Unix.O_APPEND] ~perm:0o644 ~mode:Lwt_io.Output path >>= fun oc -> 
-
-    let start_msg = Printf.sprintf "{\"log\": \"Engine attached\", \"stream\": \"system\", \"time\": \"%f\"}" (Unix.gettimeofday ()) in
-    Lwt_io.write oc start_msg >>= fun () ->
-    Lwt.return oc
-
-let rec read_log_stream stream_name ic log_oc =
-    let open Lwt.Infix in
-    Lwt_io.read_line_opt ic >>= function
-    | Some line ->
-        let json_log = Printf.sprintf
-        "{\"log\": \"%s\", \"stream\": \"%s\", \"time\": \"%f\"}" 
-            (String.escaped line) stream_name (Unix.gettimeofday ())
-        in
-        Lwt_io.write log_oc json_log >>= fun () ->
-        Lwt_io.flush log_oc >>= fun () ->
-        read_log_stream stream_name ic log_oc
-    | None ->
-        Printf.printf "[Logger] %s stream closed.\n%!" stream_name;
-        Lwt.return_unit
-
-
-let log folder stdout stderr =
-    let open Lwt.Infix in
-
-    let stdout_fd = Lwt_unix.of_unix_file_descr stdout in
-    let stderr_fd = Lwt_unix.of_unix_file_descr stderr in
-
-    let stdout = Lwt_io.of_fd ~mode:Lwt_io.Input stdout_fd in
-    let stderr = Lwt_io.of_fd ~mode:Lwt_io.Input stderr_fd in
-
-    setup_logger folder >>= fun oc ->
-
-    Printf.printf "[Logger] Log multiplexer attached and listening...\n%!";
-    
-    Lwt.join [
-        read_log_stream "stdout" stdout oc;
-        read_log_stream "stderr" stderr oc;
-    ] >>= fun () ->
-
-    Printf.printf "[Logger] Container logging finished. Closing file.\n%!";
-    Lwt_io.close oc >>= fun () ->
-    Lwt.return_unit
-
 let setup_server path =
     let open Lwt.Infix in
     if Sys.file_exists path then Sys.remove path;
@@ -156,7 +109,7 @@ let start_container (config: Parse.container_config) syn1_r folder stdout_w stde
             Printf.printf "\n[Container] Crashed %s\n%!" (Printexc.to_string e);
             exit 1
 
-let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r stderr_r folder _ =
+let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r stderr_r folder id =
     wait_pipe syn2_r;
 
     Cgroup.setup_cgroup pid;
@@ -169,12 +122,16 @@ let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r st
     Unix.close syn1_w;
     Unix.close syn2_r;
 
-    let sock_path = Printf.sprintf "%s/shim.sock" folder in
+    let sock_path = Printf.sprintf "/run/pint/containers/%s/shim.sock" id in
+    let log_sock_path = Printf.sprintf "/run/pint/containers/%s/logs.sock" id in
+
+    let log_buffer = Ringbuffer.create 1000 in
 
     Lwt.Infix.(Lwt_main.run(
         Lwt.pick [
-            log folder stdout_r stderr_r;
+            Multiplexer.start folder stdout_r stderr_r log_buffer;
             server sock_path pid;
+            Logserver.start log_sock_path log_buffer;
         ] >>= fun _ ->
         Lwt.return_unit
     ));
@@ -185,7 +142,9 @@ let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r st
 
     Ipam.release_ip ip;
 
-    Sys.remove sock_path
+    Sys.remove sock_path;
+    Sys.remove log_sock_path;
+    Unix.rmdir (Printf.sprintf "/run/pint/containers/%s" id)
 
 
 let start_daemon ip config folder id =

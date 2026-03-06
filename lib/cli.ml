@@ -90,6 +90,10 @@ let setup_rootfs container_id =
     | _ ->
         failwith "Fatal: GNU Tar failed to extract the rootfs!"
 
+let setup_run_folder container_id =
+    let path = Printf.sprintf "/run/pint/containers/%s" container_id in
+    safe_mkdir path
+
 let setup_container config_path =
     let id = generate_id () in
 
@@ -101,9 +105,83 @@ let setup_container config_path =
     List.iter safe_mkdir dirs;
     copy_file config_path (path ^ "/config.json");
     setup_rootfs id;
+    setup_run_folder id;
     path, id
 
-let setup_and_start_container config_path =
+let format_log json_str =
+    let open Yojson.Basic.Util in
+    try
+        let json = Yojson.Basic.from_string json_str in
+
+        json |> member "log" |> to_string
+    with _ ->
+        json_str
+
+let send_command sock_path cmd =
+    let open Lwt.Infix in
+    
+    Lwt_unix.file_exists sock_path >>= fun exists ->
+    if not exists then begin
+        Printf.printf "Cannot send command: Socket %s not found.\n%!" sock_path;
+        Lwt.return_unit
+    end else begin
+        let socket = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+        
+        Lwt.catch (fun () ->
+            Lwt_unix.connect socket (Unix.ADDR_UNIX sock_path) >>= fun () ->
+            
+            let oc = Lwt_io.of_fd ~mode:Lwt_io.Output socket in
+            
+            Lwt_io.write_line oc cmd >>= fun () ->
+            Lwt_io.close oc
+        ) (fun exn ->
+            Printf.printf "Failed to send command to Shim: %s\n%!" (Printexc.to_string exn);
+            Lwt_unix.close socket
+        )
+    end
+
+let stream_logs log_sock_path cmd_sock_path =
+    let open Lwt.Infix in
+
+    let _signal_id = Lwt_unix.on_signal Sys.sigint (fun _ ->
+        Lwt.async (fun () ->
+            send_command cmd_sock_path "stop" >>= fun () ->
+            exit 0
+        )
+    ) in
+    
+    let rec connect_with_retry retries =
+        if retries = 0 then
+            Lwt.fail_with "Could not connect to log socket (Timeout)"
+        else if Sys.file_exists log_sock_path then
+            let sock = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+            Lwt.catch (fun () ->
+                Lwt_unix.connect sock (Unix.ADDR_UNIX log_sock_path) >>= fun () ->
+                Lwt.return sock
+            ) (fun _exn ->
+                Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry (retries - 1)
+            )
+        else
+            Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry (retries -1)
+    in
+    
+    connect_with_retry 20 >>= fun sock ->
+    
+    let ic = Lwt_io.of_fd ~mode:Lwt_io.Input sock in
+    let rec read_loop () = 
+        Lwt_io.read_line_opt ic >>= function
+        | Some raw_json ->
+            let readable_msg = format_log raw_json in
+            Printf.printf "%s\n%!" readable_msg;
+            read_loop ()
+        | None ->
+            Printf.printf "\nContainer exited or log stream closed.\n%!";
+            Lwt.return_unit
+    in
+    read_loop ()
+    
+
+let setup_and_start_container config_path detach =
     let (folder, id) = setup_container config_path in
 
     match Unix.fork () with
@@ -111,11 +189,20 @@ let setup_and_start_container config_path =
     | 0 -> 
         ignore (Unix.execv "/proc/self/exe" [|"pint"; "internal_shim"; id; folder|])
     | _ ->
-        Printf.printf "Container %s started in background!\n" id;
-        exit 0
+        if detach then begin
+            Printf.printf "Container %s started in the background!\n%!" id;
+            exit 0
+        end else begin
+            Printf.printf "Attaching to container %s... (Press Ctrl+C to stop)\n%!" id;
+
+            let log_sock = Printf.sprintf "/run/pint/containers/%s/logs.sock" id in
+            let cmd_sock = Printf.sprintf "/run/pint/containers/%s/shim.sock" id in
+            
+            Lwt_main.run (stream_logs log_sock cmd_sock)
+        end
 
 let stop_container container_id = 
-    let folder = Printf.sprintf "/var/lib/pint/containers/%s" container_id in
+    let folder = Printf.sprintf "/run/pint/containers/%s" container_id in
     if not (Sys.file_exists folder) then begin
         Printf.printf "The container with id %s does not exist!\n" container_id;
         exit 1
@@ -175,4 +262,142 @@ let stop_container container_id =
             Printf.printf "Warning: Container %s did not shut down within 5 seconds.\n%!" container_id
     end else
         Printf.printf "Container %s is already stopped or the Shim crashed\n%!" container_id
+
+
+let ping_container id =
+    let open Lwt.Infix in
+    let sock_path = Printf.sprintf "/run/pint/containers/%s/shim.sock" id in
+
+    Lwt_unix.file_exists sock_path >>= fun exists ->
+    if not exists then
+        Lwt.return (id, "Stopped")
+    else 
+        let sock = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+        
+        Lwt.catch (fun () ->
+            Lwt_unix.connect sock (Unix.ADDR_UNIX sock_path) >>= fun () ->
+            Lwt_unix.close sock >>= fun () ->
+            Lwt.return (id, "Up")
+        )
+        (fun _exn ->
+            Lwt_unix.close sock >>= fun () ->
+            Lwt.return (id, "Exited (Dirty)")
+        )
+
+
+let get_container_ids path =
+    let open Lwt.Infix in
+    Lwt.catch (fun () ->
+        Lwt_unix.opendir path >>= fun dir ->
+        let rec read_all acc =
+            Lwt.catch (fun () ->
+                Lwt_unix.readdir dir >>= fun name ->
+                if name = "." || name = ".." then
+                    read_all acc
+                else
+                    read_all (name :: acc)
+            )
+            (function
+                | End_of_file ->
+                    Lwt_unix.closedir dir >>= fun () -> Lwt.return acc
+                | exn ->
+                    Lwt_unix.closedir dir >>= fun () -> Lwt.fail exn
+            )
+        in
+        read_all []
+    )
+    (fun _exn ->
+        Lwt.return []
+    )
+
+
+let list_containers all =
+    let open Lwt.Infix in
+    let path = 
+        if all then "/var/lib/pint/containers"
+        else"/run/pint/containers"
+    in
+
+    Lwt_main.run (
+        get_container_ids path >>= fun ids ->
+
+        if ids = [] then begin
+            if all then 
+                Printf.printf "No containers found on disk.\n%!"
+            else
+                Printf.printf "No running containers found.\n%!";
+            Lwt.return_unit
+        end else begin
+            Lwt_list.map_p ping_container ids >>= fun results ->
+            
+            Printf.printf "%-35s %s\n" "CONTAINER ID" "STATUS";
+            Printf.printf "-----------------------------------------------------\n";
+            
+            List.iter (fun (id, status) ->
+                Printf.printf "%-35s %s\n" id status
+            ) results;
+
+            Lwt.return_unit
+        end
+    )
+
+
+let rec rm_rf path =
+    try
+        let stats = Unix.lstat path in
+        
+        match stats.st_kind with
+        | Unix.S_DIR ->
+            let dir = Unix.opendir path in
+            let rec process_entries () =
+                match Unix.readdir dir with
+                | "." | ".." ->
+                    process_entries ()
+                | entry ->
+                    let child_path = Filename.concat path entry in
+                    rm_rf child_path;
+                    process_entries ()
+                | exception End_of_file ->
+                    ()
+            in
+
+            process_entries ();
+            Unix.closedir dir;
+            
+            Unix.rmdir path
+        | _ ->
+            Unix.unlink path
+    with Unix.Unix_error (Unix.ENOENT, _, _) ->
+        ()
+
+
+let remove_container id force =
+    let path = Printf.sprintf "/var/lib/pint/containers/%s" id in
+
+    if not (Sys.file_exists path) then 
+        Printf.printf "Container with id %s does not exist!\n%!" id
+    else begin
+        let (_, status) = Lwt_main.run (ping_container id) in
+
+        if status = "Up" then begin
+            if force then begin
+                stop_container id;
+
+                rm_rf path;
+                Printf.printf "Successfully removed container %s\n%!" id
+            end else 
+                Printf.printf "Error: Container %s is still running. Stop it before removing it.\n%!" id
+        end else begin
+            
+            rm_rf path;
+            Printf.printf "Successfully removed container %s\n%!" id
+        end
+    end
+        
+
+
+
+    
+        
+
     

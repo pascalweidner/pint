@@ -20,6 +20,7 @@ let init_infrastructure () =
     let run_base = "/run/pint" in
     let run_dirs = [
         run_base ^ "/network";
+        run_base ^ "/containers";
     ] in
 
     safe_mkdir var_base;
