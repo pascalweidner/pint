@@ -139,14 +139,24 @@ let start_container (config: Parse.container_config) syn1_r folder stdout_w stde
                 Unix.close stdout_w;
                 Unix.close stderr_w;
 
-                ignore (Unix.waitpid [] pid)
+                Sys.set_signal Sys.sigterm (Sys.Signal_handle (fun _ ->
+                    try Unix.kill pid Sys.sigkill with _ -> ()
+                ));
+
+                let rec wait_loop () =
+                    try
+                        ignore (Unix.waitpid [] pid)
+                    with Unix.Unix_error (Unix.EINTR, _, _) ->
+                        wait_loop ();
+                in
+                wait_loop ()
 
 
         with e ->
             Printf.printf "\n[Container] Crashed %s\n%!" (Printexc.to_string e);
             exit 1
 
-let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r stderr_r folder =
+let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r stderr_r folder _ =
     wait_pipe syn2_r;
 
     Cgroup.setup_cgroup pid;
@@ -173,10 +183,12 @@ let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r st
 
     Cgroup.destroy_cgroup pid;
 
-    Ipam.release_ip ip
+    Ipam.release_ip ip;
+
+    Sys.remove sock_path
 
 
-let start_daemon ip config folder =
+let start_daemon ip config folder id =
     let (syn1_r, syn1_w) = Unix.pipe () in
     let (syn2_r, syn2_w) = Unix.pipe () in
 
@@ -197,10 +209,10 @@ let start_daemon ip config folder =
         Unix.close stdout_w;
         Unix.close stderr_w;
 
-        start_shim pid config ip syn1_w syn2_r stdout_r stderr_r folder
+        start_shim pid config ip syn1_w syn2_r stdout_r stderr_r folder id
 
 
-let setup_and_start config folder =
+let setup_and_start config folder id =
     ignore (Unix.setsid ());
 
     let dev_null = Unix.openfile "/dev/null" [Unix.O_RDWR] 0o666 in
@@ -212,4 +224,4 @@ let setup_and_start config folder =
     let ip = Ipam.get_ip () in
 
 
-    start_daemon ip config folder
+    start_daemon ip config folder id

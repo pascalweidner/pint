@@ -8,16 +8,17 @@ let usage () =
     print_endline "  rm <container_name>    Delete a stopped container";
     print_endline "  start <container_name> Start a stopped container"
 
+
 let internal_shim args =
     if (Array.length args) <> 4 then failwith "Internal error: Invalid shim";
 
-    let _ = args.(2) in
+    let id = args.(2) in
     let folder = args.(3) in
 
     let config_path = Printf.sprintf "%s/config.json" folder in
     let config = Parse.load_config config_path in
 
-    Shim.setup_and_start config folder
+    Shim.setup_and_start config folder id
 
 let run args =
     if (Array.length args) <> 3 then usage ();
@@ -25,6 +26,13 @@ let run args =
     let config_path = args.(2) in
 
     Cli.setup_and_start_container config_path
+
+let stop args =
+    if (Array.length args) <> 3 then usage ();
+
+    let container_id = args.(2) in
+
+    Cli.stop_container container_id
 
 
 let () =
@@ -39,7 +47,7 @@ let () =
 
         match args.(1) with
         | "run" -> run args
-        | "stop" -> ()
+        | "stop" -> stop args
         | "internal_shim" -> internal_shim args
         | _ -> 
             Printf.printf "Unknown command: %s\n" args.(1);

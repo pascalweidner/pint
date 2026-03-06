@@ -113,3 +113,66 @@ let setup_and_start_container config_path =
     | _ ->
         Printf.printf "Container %s started in background!\n" id;
         exit 0
+
+let stop_container container_id = 
+    let folder = Printf.sprintf "/var/lib/pint/containers/%s" container_id in
+    if not (Sys.file_exists folder) then begin
+        Printf.printf "The container with id %s does not exist!\n" container_id;
+        exit 1
+    end; 
+
+    let path = Printf.sprintf "%s/shim.sock" folder in
+    if not (Sys.file_exists path) then begin
+        Printf.printf "The container with id %s is currently not running!\n" container_id;
+        exit 1;
+    end;
+
+    let open Lwt.Infix in
+
+    let success = Lwt_main.run (
+        let sock = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+
+        Lwt.catch (fun () ->
+            Lwt_unix.connect sock (Unix.ADDR_UNIX path) >>= fun () ->
+            
+            let oc = Lwt_io.of_fd ~mode:Lwt_io.Output sock in
+
+            Lwt_io.write_line oc "stop" >>= fun () ->
+        
+            Lwt_io.close oc >>= fun () ->
+            Printf.printf "Container with id %s is stopping\n" container_id;
+            Lwt.return_true
+        )
+        (fun _exn ->
+            Lwt_unix.close sock >>= fun () ->
+            Printf.printf "Stopping container with id %s failed with error %s\n" container_id 
+                    (Printexc.to_string _exn);
+            Lwt.return_false
+        )
+    ) in
+
+    let wait_for_cleanup socket_path timeout_seconds =
+        let start_time = Unix.gettimeofday () in
+        
+        let rec poll () =
+            if not (Sys.file_exists socket_path) then
+                true
+            else if Unix.gettimeofday () -. start_time > timeout_seconds then
+                false
+            else begin
+                Unix.sleepf 0.1;
+                poll ()
+            end
+        in
+        poll ()
+    in
+    if success then begin
+        Printf.printf "Waiting for container to cleanly shut down...\n%!";
+
+        if wait_for_cleanup path 5.0 then
+            Printf.printf "Container %s stopped successfully!\n%!" container_id 
+        else
+            Printf.printf "Warning: Container %s did not shut down within 5 seconds.\n%!" container_id
+    end else
+        Printf.printf "Container %s is already stopped or the Shim crashed\n%!" container_id
+    
