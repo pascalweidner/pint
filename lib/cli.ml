@@ -152,7 +152,7 @@ let stream_logs log_sock_path cmd_sock_path =
     
     let rec connect_with_retry retries =
         if retries = 0 then
-            Lwt.fail_with "Could not connect to log socket (Timeout)"
+            Lwt.fail_with "Could not connect to log socket (Timeout) logs"
         else if Sys.file_exists log_sock_path then
             let sock = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
             Lwt.catch (fun () ->
@@ -165,7 +165,7 @@ let stream_logs log_sock_path cmd_sock_path =
             Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry (retries -1)
     in
     
-    connect_with_retry 20 >>= fun sock ->
+    connect_with_retry 100 >>= fun sock ->
     
     let ic = Lwt_io.of_fd ~mode:Lwt_io.Input sock in
     let rec read_loop () = 
@@ -179,15 +179,47 @@ let stream_logs log_sock_path cmd_sock_path =
             Lwt.return_unit
     in
     read_loop ()
+
+let stream_stdin stdin_sock_path =
+    let open Lwt.Infix in
+
+    let rec connect_with_retry retries = 
+        if retries = 0 then Lwt.fail_with "Timeout connecting to stdin socket"
+        else if Sys.file_exists stdin_sock_path then
+            let sock = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+            Lwt.catch (fun () ->
+                Lwt_unix.connect sock (Unix.ADDR_UNIX stdin_sock_path) >>= fun () ->
+                Lwt.return sock
+            ) (fun _ -> Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry (retries - 1))
+        else
+            Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry (retries - 1)
+    in
+    connect_with_retry 20 >>= fun sock ->
+    let oc = Lwt_io.of_fd ~mode:Lwt_io.Output sock in
+
+    let rec read_keyboard_loop () =
+        Lwt_io.read_char_opt Lwt_io.stdin >>= function
+        | Some char ->
+            Lwt_io.write_char oc char >>= fun () ->
+            Lwt_io.flush oc >>= fun () ->
+            read_keyboard_loop ()
+        | None ->
+            Lwt_io.close oc
+    in
+    read_keyboard_loop ()
     
 
-let setup_and_start_container config_path detach =
+let setup_and_start_container config_path detach is_interactive=
     let (folder, id) = setup_container config_path in
 
     match Unix.fork () with
     | -1 -> failwith "Container could not be created";
     | 0 -> 
-        ignore (Unix.execv "/proc/self/exe" [|"pint"; "internal_shim"; id; folder|])
+        let shim_args =
+            if is_interactive then [|"pint"; "internal_shim"; id; folder; "-i"|] 
+            else [|"pint"; "internal_shim"; id; folder|]
+        in
+        ignore (Unix.execv "/proc/self/exe" shim_args)
     | _ ->
         if detach then begin
             Printf.printf "Container %s started in the background!\n%!" id;
@@ -197,6 +229,15 @@ let setup_and_start_container config_path detach =
 
             let log_sock = Printf.sprintf "/run/pint/containers/%s/logs.sock" id in
             let cmd_sock = Printf.sprintf "/run/pint/containers/%s/shim.sock" id in
+            let stdin_sock = Printf.sprintf "/run/pint/containers/%s/stdin.sock" id in
+
+            if is_interactive then begin
+                Lwt.async (fun () ->
+                    Lwt.catch 
+                        (fun () -> stream_stdin stdin_sock)
+                        (fun _exn -> Lwt.return_unit)
+                )
+            end;
             
             Lwt_main.run (stream_logs log_sock cmd_sock)
         end
@@ -394,10 +435,3 @@ let remove_container id force =
         end
     end
         
-
-
-
-    
-        
-
-    

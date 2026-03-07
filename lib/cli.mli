@@ -1,4 +1,4 @@
-val setup_and_start_container: string -> bool -> unit
+val setup_and_start_container: string -> bool -> bool -> unit
 
 val stop_container: string -> unit 
 

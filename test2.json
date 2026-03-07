@@ -1,0 +1,16 @@
+{
+    "container_name": "my_web_app2",
+    "command": [
+        "/bin/cat"
+    ],
+    "port_mappings": [
+        { "host": 8080, "container": 80 }
+    ],
+    "mounts": [
+        { "host": "/mnt/d/development/pint/code", "container": "/app" }
+    ],
+    "resources": {
+        "memory_mb": 100,
+        "pids_limit": 512
+    }
+}

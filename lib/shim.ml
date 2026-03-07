@@ -48,7 +48,7 @@ let server path gc_pid =
 
 
 
-let start_container (config: Parse.container_config) syn1_r folder stdout_w stderr_w syn2_w =
+let start_container (config: Parse.container_config) syn1_r folder stdout_w stderr_w syn2_w stdin_r=
     try
             Isolate.(namespaces [NEWPID; NEWNET]);
 
@@ -67,17 +67,25 @@ let start_container (config: Parse.container_config) syn1_r folder stdout_w stde
 
                 Mount.setup_mount_ns (folder ^ "/rootfs");
 
-                Printf.printf "\n[Container] pivot_root successful!\n";
-
-                let dev_null = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0o666 in
-                Unix.dup2 dev_null Unix.stdin;
-                Unix.close dev_null;
-
                 Unix.dup2 stdout_w Unix.stdout;
                 Unix.dup2 stderr_w Unix.stderr;
 
                 Unix.close stdout_w;
                 Unix.close stderr_w;
+
+                Printf.printf "\n[Container] pivot_root successful!\n";
+
+                match stdin_r with
+                | Some r -> begin
+                    Unix.dup2 r Unix.stdin;
+                    Unix.close r
+                end
+                | None -> begin
+                    let dev_null = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0o666 in
+                    Unix.dup2 dev_null Unix.stdin;
+                    Unix.close dev_null
+                end;
+                
 
                 Printf.printf "\n[Container] Start shell...\n%!";
 
@@ -91,6 +99,9 @@ let start_container (config: Parse.container_config) syn1_r folder stdout_w stde
             | pid -> 
                 Unix.close stdout_w;
                 Unix.close stderr_w;
+                (match stdin_r with
+                | Some r -> Unix.close r
+                | None -> ());
 
                 Sys.set_signal Sys.sigterm (Sys.Signal_handle (fun _ ->
                     try Unix.kill pid Sys.sigkill with _ -> ()
@@ -109,7 +120,7 @@ let start_container (config: Parse.container_config) syn1_r folder stdout_w stde
             Printf.printf "\n[Container] Crashed %s\n%!" (Printexc.to_string e);
             exit 1
 
-let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r stderr_r folder id =
+let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r stderr_r folder id stdin_w =
     wait_pipe syn2_r;
 
     Cgroup.setup_cgroup pid;
@@ -124,15 +135,25 @@ let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r st
 
     let sock_path = Printf.sprintf "/run/pint/containers/%s/shim.sock" id in
     let log_sock_path = Printf.sprintf "/run/pint/containers/%s/logs.sock" id in
+    let stdin_sock_path = Printf.sprintf "/run/pint/containers/%s/stdin.sock" id in
 
     let log_buffer = Ringbuffer.create 1000 in
 
+    let base_servers = [
+        Multiplexer.start folder stdout_r stderr_r log_buffer;
+        server sock_path pid;
+        Logserver.start log_sock_path log_buffer;
+    ] in
+
+    let all_servers = match stdin_w with
+        | Some w ->
+            (Stdinserver.start stdin_sock_path w) :: base_servers
+        | None ->
+            base_servers
+    in
+
     Lwt.Infix.(Lwt_main.run(
-        Lwt.pick [
-            Multiplexer.start folder stdout_r stderr_r log_buffer;
-            server sock_path pid;
-            Logserver.start log_sock_path log_buffer;
-        ] >>= fun _ ->
+        Lwt.pick all_servers >>= fun _ ->
         Lwt.return_unit
     ));
 
@@ -144,15 +165,21 @@ let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r st
 
     Sys.remove sock_path;
     Sys.remove log_sock_path;
+    (match stdin_w with Some _ -> Sys.remove stdin_sock_path | None -> ());
     Unix.rmdir (Printf.sprintf "/run/pint/containers/%s" id)
 
 
-let start_daemon ip config folder id =
+let start_daemon ip config folder id is_interactive =
     let (syn1_r, syn1_w) = Unix.pipe () in
     let (syn2_r, syn2_w) = Unix.pipe () in
 
     let (stdout_r, stdout_w) = Unix.pipe () in
     let (stderr_r, stderr_w) = Unix.pipe () in
+
+    let stdin_pipe = if is_interactive then
+        Some (Unix.pipe ()) else None
+    in
+
 
     match Unix.fork() with
     | -1 -> failwith "[Shim] Fork failed"
@@ -161,26 +188,38 @@ let start_daemon ip config folder id =
         Unix.close stdout_r;
         Unix.close stderr_r;
 
-        start_container config syn1_r folder stdout_w stderr_w syn2_w;
+        let stdin_r =
+            match stdin_pipe with
+            | Some (r, w) -> Unix.close w; Some r
+            | None -> None
+        in
+
+        start_container config syn1_r folder stdout_w stderr_w syn2_w stdin_r;
     | pid -> 
         Unix.close syn1_r;
         Unix.close syn2_w;
         Unix.close stdout_w;
         Unix.close stderr_w;
 
-        start_shim pid config ip syn1_w syn2_r stdout_r stderr_r folder id
+        let stdin_w = 
+            match stdin_pipe with
+            | Some (r, w) -> Unix.close r; Some w
+            | None -> None
+        in
+
+        start_shim pid config ip syn1_w syn2_r stdout_r stderr_r folder id stdin_w
 
 
-let setup_and_start config folder id =
+let setup_and_start config folder id is_interactive =
     ignore (Unix.setsid ());
 
     let dev_null = Unix.openfile "/dev/null" [Unix.O_RDWR] 0o666 in
-    Unix.dup2 dev_null Unix.stdin;
-    Unix.dup2 dev_null Unix.stdout;
+    (*Unix.dup2 dev_null Unix.stdin;
+    Unix.dup2 dev_null Unix.stdout;*)
     Unix.dup2 dev_null Unix.stderr;
     Unix.close dev_null;
 
     let ip = Ipam.get_ip () in
 
 
-    start_daemon ip config folder id
+    start_daemon ip config folder id is_interactive

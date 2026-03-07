@@ -10,27 +10,55 @@ let usage () =
     print_endline "  ps                     List all running containers"
 
 
-
 let internal_shim args =
-    if (Array.length args) <> 4 then failwith "Internal error: Invalid shim";
+    (*if (Array.length args) <> 4 then failwith "Internal error: Invalid shim";*)
 
     let id = args.(2) in
     let folder = args.(3) in
+    let interactive =
+        if Array.length args = 5 && args.(4) = "-i" then 
+            true
+        else
+            false
+    in
 
     let config_path = Printf.sprintf "%s/config.json" folder in
     let config = Parse.load_config config_path in
 
-    Shim.setup_and_start config folder id
+    Shim.setup_and_start config folder id interactive
+
 
 let run args =
-    if (Array.length args) <> 3 then usage ();
+    let args_list =
+        let all_args = Array.to_list args in
+        match all_args with
+        | _ :: _ :: rest -> rest
+        | _ -> []
+    in
 
-    let config_path = args.(2) in
+    let rec parse detach is_interactive config_path = function
+        | [] -> (detach, is_interactive, config_path)
+        | ("-id" | "-di") :: rest ->
+            parse true true config_path rest
+        | ("-d" | "--detach") :: rest ->
+            parse true is_interactive config_path rest
+        | ("-i" | "--interactive") :: rest ->
+            parse detach true config_path rest
+        | value :: rest ->
+            if config_path = None then
+                parse detach is_interactive (Some value) rest
+            else failwith (Printf.sprintf "Unexpected argument: %s" value)
+    in
 
-    Cli.setup_and_start_container config_path
+    match parse false false None args_list with
+        | (detach, is_interactive, Some config_path) ->
+            Cli.setup_and_start_container config_path detach is_interactive
+        | (_, _, None) ->
+            usage ()
+
 
 let stop args =
-    if (Array.length args) <> 3 then usage ();
+    if (Array.length args) <> 3 then usage (); 
 
     let container_id = args.(2) in
 
@@ -82,7 +110,7 @@ let () =
     ) else
 
         match args.(1) with
-        | "run" -> run args false
+        | "run" -> run args
         | "stop" -> stop args
         | "ps" -> ps args
         | "rm" -> rm args
