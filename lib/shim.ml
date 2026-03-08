@@ -73,21 +73,40 @@ let start_container (config: Parse.container_config) syn1_r folder stdout_w stde
                 Unix.close stdout_w;
                 Unix.close stderr_w;
 
-                Printf.printf "\n[Container] pivot_root successful!\n";
+                Printf.printf "\n[Container] pivot_root successful!\n%!";
 
-                match stdin_r with
+                (match stdin_r with
                 | Some r -> begin
                     Unix.dup2 r Unix.stdin;
-                    Unix.close r
+                    
+                    Unix.close r;
+                    
+                    Unix.clear_nonblock Unix.stdin;
+                    
                 end
                 | None -> begin
                     let dev_null = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0o666 in
                     Unix.dup2 dev_null Unix.stdin;
-                    Unix.close dev_null
-                end;
+                    Unix.close dev_null;
+                end);
                 
-
+                (*
                 Printf.printf "\n[Container] Start shell...\n%!";
+
+                let rec heartbeat_loop count =
+                    Printf.printf "OCaml Heartbeat %d...\n%!" count;
+                    Unix.sleep 1;
+                    heartbeat_loop (count + 1)
+                in
+                heartbeat_loop 1
+                *)
+
+                (*
+                for i = 3 to 1024 do
+                    try Unix.close (Obj.magic i) with _ -> Printf.printf "%d %!" i
+                done;
+                *)
+                (*Unix.close (Obj.magic 3);*)
 
                 let cmd_array = 
                     if Array.length config.command = 0 then [|"/bin/sh"|]
@@ -117,7 +136,10 @@ let start_container (config: Parse.container_config) syn1_r folder stdout_w stde
 
 
         with e ->
-            Printf.printf "\n[Container] Crashed %s\n%!" (Printexc.to_string e);
+            let err_msg = Printf.sprintf "\nFATAL CRASH: %s\n" (Printexc.to_string e) in
+            
+            (* Write directly to stderr so it hits the multiplexer perfectly! *)
+            let _ = try Unix.write_substring Unix.stderr err_msg 0 (String.length err_msg) with _ -> 0 in
             exit 1
 
 let start_shim pid (config: Parse.container_config) ip syn1_w syn2_r stdout_r stderr_r folder id stdin_w =
@@ -214,8 +236,8 @@ let setup_and_start config folder id is_interactive =
     ignore (Unix.setsid ());
 
     let dev_null = Unix.openfile "/dev/null" [Unix.O_RDWR] 0o666 in
-    (*Unix.dup2 dev_null Unix.stdin;
-    Unix.dup2 dev_null Unix.stdout;*)
+    Unix.dup2 dev_null Unix.stdin;
+    Unix.dup2 dev_null Unix.stdout;
     Unix.dup2 dev_null Unix.stderr;
     Unix.close dev_null;
 

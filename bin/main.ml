@@ -28,6 +28,14 @@ let internal_shim args =
     Shim.setup_and_start config folder id interactive
 
 
+let attach args =
+    if Array.length args <> 3 then usage ();
+
+    let id = args.(2) in
+
+    Cli.attach_container id
+
+
 let run args =
     let args_list =
         let all_args = Array.to_list args in
@@ -115,6 +123,7 @@ let () =
         | "ps" -> ps args
         | "rm" -> rm args
         | "internal_shim" -> internal_shim args
+        | "attach" -> attach args
         | _ -> 
             Printf.printf "Unknown command: %s\n" args.(1);
             usage ();

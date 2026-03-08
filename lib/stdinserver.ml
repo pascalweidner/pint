@@ -13,8 +13,8 @@ let rec stream_from_client ic stdin_oc =
     Lwt.catch (fun () ->
         Lwt_io.read_char_opt ic >>= function
         | Some char ->
-            Lwt_io.write_char stdin_oc char >>= fun () ->
-            Lwt_io.flush stdin_oc >>= fun () ->
+            let buf = Bytes.make 1 char in
+            let _ = Unix.write stdin_oc buf 0 1 in
             stream_from_client ic stdin_oc
         | None ->
             Lwt.return_unit
@@ -25,9 +25,6 @@ let rec stream_from_client ic stdin_oc =
 let start path stdin =
     let open Lwt.Infix in
 
-    let stdin_fd = Lwt_unix.of_unix_file_descr ~set_flags:false stdin in
-    let stdin_oc = Lwt_io.of_fd ~mode:Lwt_io.Output stdin_fd in
-
     setup_socket path >>= fun sock ->
     
     let rec accept_loop () =
@@ -36,7 +33,7 @@ let start path stdin =
         let ic = Lwt_io.of_fd ~mode:Lwt_io.Input client_fd in
         
         Lwt.async (fun () -> 
-            stream_from_client ic stdin_oc >>= fun () ->
+            stream_from_client ic stdin >>= fun () ->
             Lwt_io.close ic
         );
 

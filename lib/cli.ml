@@ -140,7 +140,7 @@ let send_command sock_path cmd =
         )
     end
 
-let stream_logs log_sock_path cmd_sock_path =
+let stream_logs log_sock_path cmd_sock_path id =
     let open Lwt.Infix in
 
     let _signal_id = Lwt_unix.on_signal Sys.sigint (fun _ ->
@@ -150,35 +150,55 @@ let stream_logs log_sock_path cmd_sock_path =
         )
     ) in
     
-    let rec connect_with_retry retries =
+    let rec connect_with_retry id retries =
+        let run_dir = Printf.sprintf "/run/pint/containers/%s" id in
         if retries = 0 then
             Lwt.fail_with "Could not connect to log socket (Timeout) logs"
         else if Sys.file_exists log_sock_path then
             let sock = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
             Lwt.catch (fun () ->
                 Lwt_unix.connect sock (Unix.ADDR_UNIX log_sock_path) >>= fun () ->
-                Lwt.return sock
+                Lwt.return_some sock 
             ) (fun _exn ->
-                Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry (retries - 1)
+                Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry id (retries - 1)
             )
+        else if not (Sys.file_exists run_dir) then
+            Lwt.return_none
         else
-            Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry (retries -1)
+            Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry id (retries -1)
     in
     
-    connect_with_retry 100 >>= fun sock ->
+    connect_with_retry id 100 >>= function
+    | Some sock ->
+        let ic = Lwt_io.of_fd ~mode:Lwt_io.Input sock in
+        let rec read_loop () = 
+            Lwt_io.read_line_opt ic >>= function
+            | Some raw_json ->
+                let readable_msg = format_log raw_json in
+                Printf.printf "%s\n%!" readable_msg;
+                read_loop ()
+            | None ->
+                Printf.printf "\nContainer exited or log stream closed.\n%!";
+                Lwt.return_unit
+        in
+        read_loop ()
+    | None ->
+        Printf.printf "\nContainer %s exited immediately.\n%!" id;
+        Lwt.return_unit
+
+let setup_raw_mode () =
+    let termio = Unix.tcgetattr Unix.stdin in
+    let raw = { termio with
+        Unix.c_icanon = false;  
+        Unix.c_echo = false;    
+        Unix.c_ixon = false;    
+        Unix.c_vmin = 1;        
+        Unix.c_vtime = 0;
+    } in
+    Unix.tcsetattr Unix.stdin Unix.TCSADRAIN raw;
     
-    let ic = Lwt_io.of_fd ~mode:Lwt_io.Input sock in
-    let rec read_loop () = 
-        Lwt_io.read_line_opt ic >>= function
-        | Some raw_json ->
-            let readable_msg = format_log raw_json in
-            Printf.printf "%s\n%!" readable_msg;
-            read_loop ()
-        | None ->
-            Printf.printf "\nContainer exited or log stream closed.\n%!";
-            Lwt.return_unit
-    in
-    read_loop ()
+    (* Return a closure to easily restore the terminal later *)
+    fun () -> Unix.tcsetattr Unix.stdin Unix.TCSADRAIN termio
 
 let stream_stdin stdin_sock_path =
     let open Lwt.Infix in
@@ -197,16 +217,32 @@ let stream_stdin stdin_sock_path =
     connect_with_retry 20 >>= fun sock ->
     let oc = Lwt_io.of_fd ~mode:Lwt_io.Output sock in
 
-    let rec read_keyboard_loop () =
+    let restore_terminal = setup_raw_mode () in
+    Stdlib.at_exit restore_terminal;
+
+    let rec read_keyboard_loop last_was_ctrl_p =
         Lwt_io.read_char_opt Lwt_io.stdin >>= function
+        | Some '\x10' ->
+            read_keyboard_loop true
+        | Some '\x11' when last_was_ctrl_p ->
+            restore_terminal ();
+            Printf.printf "\r\n[CLI] Detach sequence (Ctrl+P, Ctrl+Q) received. Detaching...\n%!";
+            exit 0
         | Some char ->
+            (if last_was_ctrl_p then
+                Lwt_io.write_char oc '\x10'
+            else
+                Lwt.return_unit)
+            >>= fun () ->
+
             Lwt_io.write_char oc char >>= fun () ->
             Lwt_io.flush oc >>= fun () ->
-            read_keyboard_loop ()
+            read_keyboard_loop false
         | None ->
+            restore_terminal ();
             Lwt_io.close oc
     in
-    read_keyboard_loop ()
+    read_keyboard_loop false
     
 
 let setup_and_start_container config_path detach is_interactive=
@@ -239,8 +275,28 @@ let setup_and_start_container config_path detach is_interactive=
                 )
             end;
             
-            Lwt_main.run (stream_logs log_sock cmd_sock)
+            Lwt_main.run (stream_logs log_sock cmd_sock id)
         end
+
+let attach_container id = 
+    let log_sock = Printf.sprintf "/run/pint/containers/%s/logs.sock" id in
+    let cmd_sock = Printf.sprintf "/run/pint/containers/%s/shim.sock" id in
+    let stdin_sock = Printf.sprintf "/run/pint/containers/%s/stdin.sock" id in
+
+    if not (Sys.file_exists log_sock) then
+        failwith "Container is not running or doesn't support attaching.";
+
+    Printf.printf "Attaching to %s... (Press Ctrl+C to detach)/n%!" id;
+
+    if Sys.file_exists stdin_sock then begin
+        Lwt.async (fun () ->
+            Lwt.catch
+                (fun () -> stream_stdin stdin_sock)
+                (fun _ -> Lwt.return_unit)
+        )
+    end;
+
+    Lwt_main.run (stream_logs log_sock cmd_sock id)
 
 let stop_container container_id = 
     let folder = Printf.sprintf "/run/pint/containers/%s" container_id in
