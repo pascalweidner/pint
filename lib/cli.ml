@@ -126,7 +126,7 @@ let send_command sock_path cmd =
         Lwt.return_unit
     end else begin
         let socket = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
-        
+        (*TODO: implement a retry logic here*) 
         Lwt.catch (fun () ->
             Lwt_unix.connect socket (Unix.ADDR_UNIX sock_path) >>= fun () ->
             
@@ -143,6 +143,7 @@ let send_command sock_path cmd =
 let stream_logs log_sock_path cmd_sock_path id =
     let open Lwt.Infix in
 
+    (*TODO: this should be in its own function or in a parent function*)
     let _signal_id = Lwt_unix.on_signal Sys.sigint (fun _ ->
         Lwt.async (fun () ->
             send_command cmd_sock_path "stop" >>= fun () ->
@@ -150,6 +151,7 @@ let stream_logs log_sock_path cmd_sock_path id =
         )
     ) in
     
+    (*TODO: refactor this retry connection logic, see below*)
     let rec connect_with_retry id retries =
         let run_dir = Printf.sprintf "/run/pint/containers/%s" id in
         if retries = 0 then
@@ -163,9 +165,10 @@ let stream_logs log_sock_path cmd_sock_path id =
                 Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry id (retries - 1)
             )
         else if not (Sys.file_exists run_dir) then
-            Lwt.return_none
+            Lwt.return_none (*TODO: shouldn't this fail or do we even need it? and do
+            we have to handle this for the other equal function as well?*)
         else
-            Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry id (retries -1)
+            Lwt_unix.sleep 0.05 >>= fun () -> connect_with_retry id (retries - 1)
     in
     
     connect_with_retry id 100 >>= function
@@ -203,6 +206,7 @@ let setup_raw_mode () =
 let stream_stdin stdin_sock_path =
     let open Lwt.Infix in
 
+    (*TODO: refactor this retry connect logic in its own function *)
     let rec connect_with_retry retries = 
         if retries = 0 then Lwt.fail_with "Timeout connecting to stdin socket"
         else if Sys.file_exists stdin_sock_path then
@@ -279,6 +283,7 @@ let setup_and_start_container config_path detach is_interactive=
         end
 
 let attach_container id = 
+    (*TODO: Have these strings globally or inject them with a Functor*)
     let log_sock = Printf.sprintf "/run/pint/containers/%s/logs.sock" id in
     let cmd_sock = Printf.sprintf "/run/pint/containers/%s/shim.sock" id in
     let stdin_sock = Printf.sprintf "/run/pint/containers/%s/stdin.sock" id in
