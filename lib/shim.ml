@@ -240,6 +240,7 @@ let setup_and_start config folder id is_interactive =
     Unix.dup2 dev_null Unix.stdout;
     Unix.dup2 dev_null Unix.stderr;
     Unix.close dev_null;
+    (*TODO: check that all other file descriptors are closed*)
 
     let ip = Ipam.get_ip () in
 

@@ -11,7 +11,29 @@ let read_ips file_path =
                 acc
         in
         aux [] |> List.sort Int.compare
-    with Sys_error _ -> []
+    with 
+        | Sys_error _ -> []
+
+
+(*TODO: Factor this atomic write out to use it for all writes*)
+let write_ips_ordered file_path ips =
+    let updated_ips = List.sort Int.compare ips in
+    (*Creates a temporary file to which to write before swapping
+      the temp file with the real one*)
+    let temp_path = file_path ^ ".tmp" in
+
+    try
+        Out_channel.with_open_text temp_path (fun oc -> 
+            List.iter (fun ip -> Printf.fprintf oc "%d\n" ip) updated_ips
+        );
+
+        (*Overwrites the original file with the temporary one*)
+        Sys.rename temp_path file_path
+    with exn ->
+        if Sys.file_exists temp_path then Sys.remove temp_path;
+        failwith ("[IPAM] Fatal: IPs could not be written: " ^Printexc.to_string exn)
+
+
 
 let get_ip () =
     let lock_file = "/run/pint/network/ipam.lock" in
@@ -35,12 +57,10 @@ let get_ip () =
                 else
                     find_smallest expected t
         in
+
         let next_ip = find_smallest 2 ips in
 
-        let updated_ips = List.sort Int.compare (next_ip :: ips) in
-        let oc = open_out file_path in
-        List.iter (fun ip -> Printf.fprintf oc "%d\n" ip) updated_ips;
-        close_out oc;
+        write_ips_ordered file_path (next_ip :: ips);
 
         Printf.printf "[IPAM] Ip written to allocated.txt\n%!";
 
@@ -72,9 +92,7 @@ let release_ip ip =
         
         let updated_ips = List.filter (fun curr_ip -> curr_ip <> ip_to_release) ips in
 
-        let oc = open_out file_path in
-        List.iter (fun ip -> Printf.fprintf oc "%d\n" ip) updated_ips;
-        close_out oc;
+        write_ips_ordered file_path updated_ips;
 
         Printf.printf "[IPAM] Successfully released IP: 10.0.0.%d\n%!" ip_to_release;
 
